@@ -1,0 +1,252 @@
+/*---------------------------------------------------------------------------------------------------------------------------------------
+
+PROGRAM: TxApp.cpp
+
+PURPOSE:
+    Prompts the user for input, which is sent to the server.  Once the server is finished processing the filtered sine wave, values are
+    sent back to this file and are uploaded to an external .txt file.
+    
+*****************************************************************************************************************************************/
+
+
+#include <string.h>
+#include <stdio.h>
+#include <Windows.h>
+#include <WinSock.h>
+#include <time.h>
+#include <conio.h>
+
+ typedef struct sp_comm {
+	WSADATA wsaData;
+	SOCKET cmdrecvsock;
+	SOCKET cmdstatusock;
+	SOCKET datasock;
+	struct sockaddr_in server;
+} * sp_comm_t; 
+
+ typedef struct sp_flags {
+	unsigned int start_system:1;
+	unsigned int pause_system:1;
+	unsigned int shutdown_system:1;
+	unsigned int analysis_started:1;
+	unsigned int restart:1;
+	unsigned int transmit_data:1;
+} * sp_flags_t;
+
+ typedef struct sp_struct{	
+	struct sp_comm		comm;
+	struct sp_flags		flags;	
+} * sp_struct_t;
+
+
+
+
+#define ERR_CODE_NONE	0	/* no error */
+#define ERR_CODE_SWI	1	/* software error */
+
+/////// 
+#define CMD_LENGTH		5
+
+#define ARG_NONE		1
+#define ARG_NUMBER		2
+
+typedef struct {
+	char cmd[CMD_LENGTH];
+	int arg;	
+} cmd_struct_t;
+WSADATA wsaData;
+
+int x = 1;
+int counter = 0;
+int checkerS = 1;
+int checkerI = 1;
+char dataChar[100] = "";
+char inhChar[100] = "";
+int sampRate = 0;
+float filSignal[10000] = {0.0};
+FILE *vptr;
+
+/* Thread to interface with the ProfileClient */
+HANDLE hClientThread; 
+DWORD dwClientThreadID;
+VOID client_iface_thread(LPVOID parameters);
+
+int main()
+{
+  struct sp_struct profiler; 
+  struct sockaddr_in saddr;
+  struct hostent *hp;
+  int res = 0;
+  char ParamBuffer[110];
+  char inputChar[100] = "";
+
+  memset(&profiler, 0, sizeof(profiler));
+  sp_comm_t comm = &profiler.comm;  
+
+	if ((res = WSAStartup(0x202,&wsaData)) != 0)  {
+		fprintf(stderr,"WSAStartup failed with error %d\n",res);
+		WSACleanup();
+		return(ERR_CODE_SWI);
+	}
+
+	/**********************************************************************************
+	 * Setup data transmition socket to broadcast data
+	 **********************************************************************************/
+
+	hp = (struct hostent*)malloc(sizeof(struct hostent));
+	hp->h_name = (char*)malloc(sizeof(char)*17);
+	hp->h_addr_list = (char**)malloc(sizeof(char*)*2);
+	hp->h_addr_list[0] = (char*)malloc(sizeof(char)*5);
+	strcpy(hp->h_name, "lab_example\0");
+	hp->h_addrtype = 2;
+	hp->h_length = 4;
+
+	//broadcast in 255.255.255.255 network 	
+	hp->h_addr_list[0][0] = (signed char)127;//192;
+	hp->h_addr_list[0][1] = (signed char)0; //168;
+	hp->h_addr_list[0][2] = (signed char)0; //0;  
+	hp->h_addr_list[0][3] = (signed char)1; //140;
+	hp->h_addr_list[0][4] = 0;
+
+	/**********************************************************************************
+	 * Setup a socket for broadcasting data 
+	 **********************************************************************************/
+	memset(&saddr, 0, sizeof(saddr));
+	saddr.sin_family = hp->h_addrtype;
+	memcpy(&(saddr.sin_addr), hp->h_addr, hp->h_length);
+	saddr.sin_port = htons(1024);
+		
+	if ((comm->datasock = socket(AF_INET,SOCK_DGRAM, 0)) == INVALID_SOCKET) {
+	    fprintf(stderr,"socket(datasock) failed: %d\n",WSAGetLastError());
+		WSACleanup();
+		return(ERR_CODE_NONE);
+	}
+
+	if (connect(comm->datasock,(struct sockaddr*)&saddr,sizeof(saddr)) == SOCKET_ERROR) {
+	    fprintf(stderr,"connect(datasock) failed: %d\n",WSAGetLastError());
+		WSACleanup();
+		return(ERR_CODE_SWI);
+	}
+
+	/**********************************************************************************
+	 * Setup and bind a socket to listen for commands from client
+	 **********************************************************************************/
+	memset(&saddr, 0, sizeof(struct sockaddr_in));
+	saddr.sin_family = AF_INET;
+	saddr.sin_addr.s_addr = INADDR_ANY; 
+	saddr.sin_port = htons(1500);	
+	if ((comm->cmdrecvsock = socket(AF_INET, SOCK_DGRAM, 0)) == INVALID_SOCKET) {
+	    fprintf(stderr,"socket(cmdrecvsock) failed: %d\n",WSAGetLastError());
+		WSACleanup();
+		return(ERR_CODE_NONE);
+	}	
+
+	if (bind(comm->cmdrecvsock,(struct sockaddr*)&saddr,sizeof(saddr) ) == SOCKET_ERROR) {
+		fprintf(stderr,"bind() failed: %d\n",WSAGetLastError());
+		WSACleanup();
+		return(ERR_CODE_NONE);
+	}
+
+	hClientThread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE) client_iface_thread, (LPVOID)&profiler, 0, &dwClientThreadID); 
+	SetThreadPriority(hClientThread, THREAD_PRIORITY_LOWEST);
+		printf("Instructions\n");
+		printf("Type the name of the file and press Enter: ");
+		scanf("%s",dataChar);
+		printf("\nNext, type in the sampling rate and press Enter : ");
+		scanf("%s",inputChar);
+		send(comm->datasock, inputChar, sizeof(inputChar), 0);
+		sampRate = atoi(inputChar);
+		vptr = fopen(dataChar,"w+");
+		while(strcmp(inputChar,"start") != 0){
+		if(checkerS == 1){
+		printf("\nTo start the system, type in 'start' then press Enter : ");
+		}else{
+			printf("\nYou did not enter 'start'.  Please enter 'start' then press Enter : ");
+		}
+		scanf("%s",inputChar);
+		send(comm->datasock, inputChar, sizeof(inputChar), 0);
+		checkerS++;
+		}
+		printf("\nTo pause the sytem, type 'pause' then press Enter");
+		printf("\nTo resume, type 'resume' then press Enter : ");
+		printf("\nTo stop the system, type 'stop' then press Enter : ");
+		while(1){
+		scanf("%s",inputChar);
+		send(comm->datasock, inputChar, sizeof(inputChar), 0);
+		}
+
+	while(x == 1)
+	{
+		if( _kbhit() )
+		{
+		   scanf("%s", inputChar);		   		   
+		   send(comm->datasock, inputChar, sizeof(inputChar), 0);
+		   }
+		}
+	vptr = fopen(dataChar,"w+");
+	return 0 ; 
+}
+
+/************************************************************************************
+ * VOID client_iface_thread(LPVOID)
+ *
+ * Description: Thread communicating commands from client and the status of their 
+ *				completion back to client. 
+ * 
+ *
+ ************************************************************************************/
+VOID client_iface_thread(LPVOID parameters) //LPVOID parameters)
+{
+  sp_struct_t profiler = (sp_struct_t)parameters;
+  sp_comm_t comm = &profiler->comm; 
+  INT retval;
+  struct sockaddr_in saddr;
+  int saddr_len;
+  int flagOne = 0;
+  char ParamBuffer[110] = "40" ;
+  int flagTwo = 0;
+
+	while(ParamBuffer[0] != '!') 
+	{
+		memset(ParamBuffer, 0, sizeof(ParamBuffer));
+		saddr_len =sizeof(saddr);		
+		retval = recvfrom(comm->cmdrecvsock, ParamBuffer, sizeof(ParamBuffer), 0, (struct sockaddr *)&saddr, &saddr_len);   
+		if(strcmp("Processing Started and Filtering",ParamBuffer) == 0){
+			printf("Processing Started and Filtering\n");
+		}
+		else if(strcmp("Filtering...",ParamBuffer) == 0){
+			flagOne = 1;
+			printf("Filtering...\n");
+		}
+		else if(strcmp("System Resumed",ParamBuffer) == 0){
+			printf("System Resumed\n");
+		}
+		else if(strcmp("System Paused",ParamBuffer) == 0){
+			printf("System Paused\n");
+		}
+		else if(strcmp("System Stopped",ParamBuffer) == 0){
+			flagTwo = 1;
+		}
+		else if(strcmp("A/D Operation Started",ParamBuffer) == 0){
+			printf("%s\n",ParamBuffer);
+		}else if(flagTwo == 1){
+			fprintf(vptr,"%s\n",ParamBuffer);
+			counter++;
+		if(counter == (sampRate * 3)){
+			printf("System Stopped\n");
+			flagOne = 0;
+			counter = 0;
+			exit(1);
+		}
+		}else if(flagOne == 1){
+			fprintf(vptr,"%s\n",ParamBuffer);
+			counter++;
+		if(counter == (sampRate * 3)){
+			printf("Transmission Complete\n");
+			flagOne = 0;
+			counter = 0;
+		}
+		}
+	}
+	x = 0;
+}

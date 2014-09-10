@@ -1,0 +1,582 @@
+/*---------------------------------------------------------------------------------------------------------------------------------------
+
+PROGRAM: DtConsole.cpp
+
+PURPOSE:
+    To continuously sample a sine wave generator (a DT9816 was used),  apply a pre-generated filter(values are stored in a separate file)
+    to the sine wave, then send the values back to the client.  For this project, the sampling rate is fixed at 2000 samples/sec
+    for 3 seconds.
+    This file also has enchanced feedback (LEDs and text) allowing the user to know which phase the project is currently in.
+    
+*****************************************************************************************************************************************/
+
+#include <windows.h>
+#include <WinSock.h>
+#include <string.h>
+#include <time.h>
+#include <stdio.h>
+#include <conio.h>
+#include "oldaapi.h"
+#include <omp.h>
+
+typedef struct sp_comm {
+	WSADATA wsaData;
+	SOCKET cmdrecvsock;
+	SOCKET cmdstatusock;
+	SOCKET datasock;
+	struct sockaddr_in server;
+} * sp_comm_t; 
+
+ typedef struct sp_flags {
+	unsigned int start_system:1;
+	unsigned int pause_system:1;
+	unsigned int shutdown_system:1;
+	unsigned int analysis_started:1;
+	unsigned int restart:1;
+	unsigned int transmit_data:1;
+} * sp_flags_t;
+
+ typedef struct sp_struct{	
+	struct sp_comm		comm;
+	struct sp_flags		flags;	
+} * sp_struct_t;
+
+
+
+
+#define ERR_CODE_NONE	0	/* no error */
+#define ERR_CODE_SWI	1	/* software error */
+
+/////// 
+#define CMD_LENGTH		5
+
+#define ARG_NONE		1
+#define ARG_NUMBER		2
+
+typedef struct {
+	char cmd[CMD_LENGTH];
+	int arg;	
+} cmd_struct_t;
+WSADATA wsaData;
+
+#define CHECKERROR( ecode )                           \
+do                                                    \
+{                                                     \
+   ECODE olStatus;                                    \
+   if( OLSUCCESS != ( olStatus = ( ecode ) ) )        \
+   {                                                  \
+      printf("OpenLayers Error %d\n", olStatus );  \
+      exit(1);                                        \
+   }                                                  \
+}                                                     \
+while(0)      
+
+#define NUM_OL_BUFFERS 4
+
+int counter = 0;
+int cT = 0;
+int cV = 0;
+int cP = 0;
+int cR = 0;
+int z = 0;
+int cY = 0;
+int cZ = 0;
+int fR = 1;
+int fS = 2;
+int checker = 0;
+int i = 0;
+int counterTwo = 0;
+int sampRate;
+char fileN[100] = "";
+FILE *coeffO;
+float *dataArray;
+int chS = 1;
+int x;
+FILE *sptr;
+char status[100] = "";
+char messG[100] = "A/D Conversion Started\n";
+char holdD[100] = " ";
+char statusTwo[100] = "";
+DWORD maxSamples;
+ float constY = 0.0;
+float constXX = 0.0;
+HDEV hDev = NULL;
+HDASS hdass = NULL;
+HDASS hAD = NULL;
+
+
+HANDLE hClientThread; 
+DWORD dwClientThreadID;
+VOID client_iface_thread(LPVOID parameters);
+
+
+LRESULT WINAPI 
+WndProc( HWND hWnd, UINT msg, WPARAM hAD, LPARAM lParam )
+{
+	PDWORD pBuffer32 = NULL;
+	PWORD pBuffer = NULL;
+	UINT resolution = 0;
+	UINT encoding = 0;
+	DBL min=0,max=0;
+    	DBL volts,voltsTwo;
+    	ULNG value;
+    	ULNG valueTwo;
+	LONG valueT = 3;
+	LONG valueTh = 2;
+	LONG valueO = 1;
+	UINT channel = 0; 
+	FILE *pptr;
+	char *place;
+	float temp = 0.0;
+	int i = 0;
+
+	DBL gain = 1;
+    	switch( msg )
+    	{
+       case OLDA_WM_BUFFER_DONE:
+          printf( "Buffer Done Count : %ld \r", counter );
+          HBUF hBuf;
+		  maxSamples = sampRate * 6;
+          	  counter++;
+		  olDaGetRange((HDASS)hAD,&max,&min);
+		  olDaGetResolution((HDASS)hAD,&resolution);
+		  olDaGetEncoding((HDASS)hAD,&encoding);
+          	  CHECKERROR (olDaGetBuffer( (HDASS)hAD, &hBuf ));
+		  CHECKERROR (olDmGetValidSamples(hBuf, &maxSamples));
+
+				if(resolution < 16){
+					olDmGetBufferPtr( hBuf, (LPVOID*)&pBuffer32);
+					sptr = fopen("Z:\\sampleText.txt","a+");
+					for(int i = 2; i <= maxSamples; i += 2){
+					value = pBuffer32[i - 2];
+					valueTwo = pBuffer32[i - 1];
+					 if (encoding != OL_ENC_BINARY) 
+					 {
+               				/* convert to offset binary by inverting the sign bit */
+      
+					 value ^= 1L << (resolution-1);
+					value &= (1L << resolution) - 1;     /* zero upper bits */
+					valueTwo ^= 1L << (resolution-1);
+					valueTwo &= (1L << resolution) - 1;
+					}
+					 volts = ((float)max-(float)min)/(1L<<resolution)*value + (float)min;
+					voltsTwo = ((float)max-(float)min)/(1L<<resolution)*valueTwo + (float)min;
+					if(voltsTwo > 4){
+						fprintf(sptr,"%f\n",volts);
+						cY = 1;
+					}
+					if(voltsTwo < 0.3 && cY == 1){
+						cY = 2;
+					}
+					}
+					fclose(sptr);
+				 }else{
+					sptr = fopen("Z:\\sampleText.txt","a+"); 
+					olDmGetBufferPtr( hBuf, (LPVOID*)&pBuffer);
+					for(int i = 2; i <= maxSamples; i += 2){
+					value = pBuffer[i - 2];
+					valueTwo = pBuffer[i - 1];
+					if (encoding != OL_ENC_BINARY) 
+					 {
+               				/* convert to offset binary by inverting the sign bit */
+      
+					 value ^= 1L << (resolution-1);
+					value &= (1L << resolution) - 1;     /* zero upper bits */
+					valueTwo ^= 1L << (resolution-1);
+					valueTwo &= (1L << resolution) - 1;
+					}
+					volts = ((float)max-(float)min)/(1L<<resolution)*value + (float)min;
+					voltsTwo = ((float)max-(float)min)/(1L<<resolution)*valueTwo + (float)min;
+					if(voltsTwo > 4){
+						fprintf(sptr,"%f\n",volts);
+						cY = 1;
+					}
+					if(voltsTwo < 0.3 && cY == 1){
+						cY = 2;
+					}
+					}
+					fclose(sptr);
+				}
+		         	 olDaPutBuffer( (HDASS)hAD, hBuf );
+				 break;
+
+       case OLDA_WM_QUEUE_DONE:
+          printf( "\nAcquisition stopped, rate too fast for current options." );
+          PostQuitMessage(0);
+          break;
+
+       case OLDA_WM_TRIGGER_ERROR:
+          printf( "\nTrigger error: acquisition stopped." );
+          PostQuitMessage(0);
+          break;
+
+       case OLDA_WM_OVERRUN_ERROR:
+          printf( "\nInput overrun error: acquisition stopped." );
+          PostQuitMessage(0);
+          break;
+
+       default: 
+          return DefWindowProc( hWnd, msg, hAD, lParam );
+    }
+    
+    return 0;
+}
+
+
+BOOL CALLBACK 
+EnumBrdProc( LPSTR lpszBrdName, LPSTR lpszDriverName, LPARAM lParam )
+{
+
+   // Make sure we can Init Board
+   if( OLSUCCESS != ( olDaInitialize( lpszBrdName, (LPHDEV)lParam ) ) )
+   {
+      return TRUE;  // try again
+   }
+
+   // Make sure Board has an A/D Subsystem 
+   UINT uiCap = 0;
+   olDaGetDevCaps ( *((LPHDEV)lParam), OLDC_ADELEMENTS, &uiCap );
+   if( uiCap < 1 )
+   {
+      return TRUE;  // try again
+   }
+
+   printf( "%s succesfully initialized.\n", lpszBrdName );
+   return FALSE;    // all set , board handle in lParam
+}
+
+
+int
+main()
+{
+  struct sp_struct profiler; 
+  struct sockaddr_in saddr;
+  struct hostent *hp;
+  int res = 0;
+  FILE *optr;
+  float temp = 0.0;
+  char ParamBuffer[110];
+  float coefArray[10000];
+  char inputChar[110] = "";
+  int tC = 0;
+  int shift = 0;
+  int k = 0;
+  int l = 0;
+  int m = 0;
+  FILE *fptr;
+  LONG valueTh = 2;
+  float tempOne = 0.0;
+  float tempTwo = 0.0;
+  char placeH[100] = "";
+  float signalOutput[16000];
+  int counterG = 0;
+  int cX = 0;
+  float yOutput[15000] = {0.0};
+  float vectorX[15000] = {0.0};
+
+  LONG valueT = 3;
+  LONG valueO = 1;
+  UINT channel = 0; 
+  DBL gain = 1;
+    WNDCLASS wc;
+    memset( &wc, 0, sizeof(wc) );
+    wc.lpfnWndProc = WndProc;
+    wc.lpszClassName = "DtConsoleClass";
+    RegisterClass( &wc );
+	UINT channelZero = 0;
+	UINT channelOne = 1;
+	fptr = fopen("Z:\\Coef.txt","r");
+		while(fgets(inputChar,sizeof(inputChar),fptr)){
+		sscanf(inputChar,"%f",&temp);
+		coefArray[tC] = temp;
+		tC++;
+	}
+  memset(&profiler, 0, sizeof(profiler));
+  sp_comm_t comm = &profiler.comm;  
+	sptr = fopen("Z:\\sampleText.txt","w+");
+	fclose(sptr);
+	if ((res = WSAStartup(0x202,&wsaData)) != 0)  {
+		fprintf(stderr,"WSAStartup failed with error %d\n",res);
+		WSACleanup();
+		return(ERR_CODE_SWI);
+	}
+
+	/**********************************************************************************
+	 * Setup data transmition socket to broadcast data
+	 **********************************************************************************/
+
+	hp = (struct hostent*)malloc(sizeof(struct hostent));
+	hp->h_name = (char*)malloc(sizeof(char)*17);
+	hp->h_addr_list = (char**)malloc(sizeof(char*)*2);
+	hp->h_addr_list[0] = (char*)malloc(sizeof(char)*5);
+	strcpy(hp->h_name, "lab_example\0");
+	hp->h_addrtype = 2;
+	hp->h_length = 4;
+
+	//broadcast in 255.255.255.255 network 	(Adjust IP Address as needed)
+
+	hp->h_addr_list[0][0] = (signed char)127;//192;
+	hp->h_addr_list[0][1] = (signed char)0; //168;
+
+
+
+	hp->h_addr_list[0][2] = (signed char)0; //0;  
+	hp->h_addr_list[0][3] = (signed char)1; //140;
+	hp->h_addr_list[0][4] = 0;
+
+	/**********************************************************************************
+	 * Setup a socket for broadcasting data 
+	 **********************************************************************************/
+	memset(&saddr, 0, sizeof(saddr));
+	saddr.sin_family = hp->h_addrtype;
+	memcpy(&(saddr.sin_addr), hp->h_addr, hp->h_length);
+	saddr.sin_port = htons(1500);
+		
+	if ((comm->datasock = socket(AF_INET,SOCK_DGRAM, 0)) == INVALID_SOCKET) {
+	    fprintf(stderr,"socket(datasock) failed: %d\n",WSAGetLastError());
+		WSACleanup();
+		return(ERR_CODE_NONE);
+	}
+
+	if (connect(comm->datasock,(struct sockaddr*)&saddr,sizeof(saddr)) == SOCKET_ERROR) {
+	    fprintf(stderr,"connect(datasock) failed: %d\n",WSAGetLastError());
+		WSACleanup();
+		return(ERR_CODE_SWI);
+	}
+
+	/**********************************************************************************
+	 * Setup and bind a socket to listen for commands from client
+	 **********************************************************************************/
+	memset(&saddr, 0, sizeof(struct sockaddr_in));
+	saddr.sin_family = AF_INET;
+	saddr.sin_addr.s_addr = INADDR_ANY; 
+	saddr.sin_port = htons(1024);	
+	if ((comm->cmdrecvsock = socket(AF_INET, SOCK_DGRAM, 0)) == INVALID_SOCKET) {
+	    fprintf(stderr,"socket(cmdrecvsock) failed: %d\n",WSAGetLastError());
+		WSACleanup();
+		return(ERR_CODE_NONE);
+	}	
+
+	if (bind(comm->cmdrecvsock,(struct sockaddr*)&saddr,sizeof(saddr) ) == SOCKET_ERROR) {
+		fprintf(stderr,"bind() failed: %d\n",WSAGetLastError());
+		WSACleanup();
+		return(ERR_CODE_NONE);
+	}
+
+	hClientThread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE) client_iface_thread, (LPVOID)&profiler, 0, &dwClientThreadID); 
+	SetThreadPriority(hClientThread, THREAD_PRIORITY_LOWEST);
+
+    printf( "Open Layers Continuous A/D Win32 Console Example\n" );
+   
+
+    HWND hWnd = CreateWindow( wc.lpszClassName,
+                              NULL, 
+                              NULL, 
+                              0, 0, 0, 0,
+                              NULL,
+                              NULL,
+                              NULL,
+                              NULL );
+
+    if( !hWnd )
+       exit( 1 );
+
+	//Hold the program until the start command is received
+	while(1){
+		if(strcmp("start",status) == 0){
+		break;
+		}
+	}
+    	CHECKERROR( olDaEnumBoards( EnumBrdProc, (LPARAM)&hDev ) );
+
+	
+	//When the start button is pressed, send the value 1 to the LEDs
+	CHECKERROR (olDaGetDASS(hDev,OLSS_DOUT,0,&hdass)); 
+	CHECKERROR (olDaSetDataFlow(hdass,OL_DF_SINGLEVALUE)); 
+	CHECKERROR (olDaConfig(hdass));
+        CHECKERROR (olDaPutSingleValue(hdass,valueO,channel,gain));
+	CHECKERROR (olDaReleaseDASS(hdass));
+
+    CHECKERROR( olDaGetDASS( hDev, OLSS_AD, 0, &hAD ) ); 
+    CHECKERROR( olDaSetWndHandle( hAD, hWnd, 0 ) ); 
+    CHECKERROR( olDaSetDataFlow( hAD, OL_DF_CONTINUOUS ) ); 
+    CHECKERROR( olDaSetChannelListSize( hAD, 2 ) );
+    CHECKERROR( olDaSetChannelListEntry( hAD, 0, channelZero ) );
+    CHECKERROR( olDaSetChannelListEntry( hAD, 1, channelOne));
+    CHECKERROR( olDaSetGainListEntry( hAD, channelZero, 1 ) );
+    CHECKERROR( olDaSetGainListEntry( hAD, channelOne, 1));
+    CHECKERROR( olDaSetTrigger( hAD, OL_TRG_SOFT ) );
+    CHECKERROR( olDaSetClockSource( hAD, OL_CLK_INTERNAL ) ); 
+    CHECKERROR( olDaSetClockFrequency( hAD, sampRate ) );
+    CHECKERROR( olDaSetWrapMode( hAD, OL_WRP_NONE ) );
+
+
+	// acquire digital handle as well
+
+    CHECKERROR( olDaConfig( hAD ) );
+
+
+    HBUF hBufs[NUM_OL_BUFFERS];				//Creates a hBufs array of type HBUF
+    for( int i=0; i < NUM_OL_BUFFERS; i++ )		//Creates 4 Buffers using the olDmAllocBuffer function
+    {
+        if( OLSUCCESS != olDmAllocBuffer( GHND, sampRate, &hBufs[i] ) )
+        {
+           for ( i--; i>=0; i-- )
+           {
+              olDmFreeBuffer( hBufs[i] );
+           }   
+           exit( 1 );   
+        }
+        olDaPutBuffer( hAD,hBufs[i] );
+    }
+
+    if( OLSUCCESS != ( olDaStart( hAD ) ) )		//Starts the A/D conversion
+    {
+       printf( "A/D Operation Start Failed...hit any key to terminate.\n" );
+    }
+    else
+    {
+       printf( "A/D Operation Started...hit any key to terminate.\n\n" );
+       printf( "Buffer Done Count : %ld \r", counter );
+    }   
+
+
+    MSG msg;                                    
+    SetMessageQueue( 50 );                      // Increase the our message queue size so
+                                                // we don't lose any data acq messages
+
+    // Acquire and dispatch messages until a key is hit...since we are a console app 
+    // we are using a mix of Windows messages for data acquistion and console approaches
+    // for keyboard input.
+    //
+    while( GetMessage( &msg,        // message structure              
+                       hWnd,        // handle of window receiving the message 
+                       0,           // lowest message to examine          
+                       0 ) )        // highest message to examine         
+    {
+       TranslateMessage( &msg );    // Translates virtual key codes      
+       DispatchMessage( &msg );     // Dispatches message to window 
+	   if(cY == 2){  
+		if(cX == 0){
+			printf("Filtering...\n");
+			cX = 1;
+		}
+	    optr = fopen("Z:\\sampleText.txt","r");   //Indicator that the system is undergoing filtering
+		while(1){
+			if(feof(optr))
+			{
+				break;
+			}
+			fscanf(optr,"%f",&tempOne);
+			signalOutput[counterG] = tempOne;
+			if(counterG >= (sampRate * 3)){
+				break;
+			}
+			
+			counterG++;
+		}
+		fclose(optr);
+
+		//Process used to apply a filter to a sine wave.
+		for(k = 0; k < (counterG); k++){
+		if(k == counterG){
+			break;
+		}
+		constXX = signalOutput[k];
+		vectorX[0] = constXX;
+		constY = 0.0;
+		for(l = 0; l < tC; l++){
+			constY = constY + (coefArray[l] * vectorX[l]);
+		}
+		for(m = tC; m >= 1; m--){
+			vectorX[m] = vectorX[m - 1];
+		}
+		yOutput[k] = constY;
+		}
+		
+		//Sends data back to client.
+		for(cZ = 0; cZ < (counterG); cZ++){
+			sprintf(inputChar,"%f",yOutput[cZ]);
+			send(comm->datasock, inputChar, sizeof(inputChar), 0);
+		}
+
+		if(cZ >= (counterG)){
+        	CHECKERROR (olDaGetDASS(hDev,OLSS_DOUT,0,&hdass)); 
+		CHECKERROR (olDaSetDataFlow(hdass,OL_DF_SINGLEVALUE)); 
+		CHECKERROR (olDaConfig(hdass));
+        	CHECKERROR (olDaPutSingleValue(hdass,valueT,channel,gain));
+		CHECKERROR (olDaReleaseDASS(hdass));
+	}
+	}
+
+	}
+
+    // abort A/D operation
+    olDaAbort( hAD );
+    printf( "\nA/D Operation Terminated \n" );
+
+    for(int i=0; i<NUM_OL_BUFFERS; i++ ) 
+    {
+       olDmFreeBuffer( hBufs[i] );
+    }   
+    olDaTerminate( hDev );
+	return ((UINT)NULL);
+}
+
+/************************************************************************************
+ * VOID client_iface_thread(LPVOID)
+ *
+ * Description: Thread communicating commands from client and the status of their 
+ *				completion back to client. 
+ * 
+ *
+ ************************************************************************************/
+VOID client_iface_thread(LPVOID parameters) //LPVOID parameters)
+{
+  sp_struct_t profiler = (sp_struct_t)parameters;
+  sp_comm_t comm = &profiler->comm; 
+  INT retval;
+  struct sockaddr_in saddr;
+  int saddr_len;
+  char ParamBuffer[110] = "40";
+  UINT channel = 0;
+  DBL gain = 1;
+
+
+    printf("Waiting for Command...\n");
+	while(ParamBuffer[0] != '!') 
+	{
+		memset(ParamBuffer, 0, sizeof(ParamBuffer));
+		saddr_len =sizeof(saddr);		
+		retval = recvfrom(comm->cmdrecvsock, ParamBuffer, sizeof(ParamBuffer), 0, (struct sockaddr *)&saddr, &saddr_len);   
+		if(chS == 1){
+		sampRate = atoi(ParamBuffer);
+		}
+		if(strcmp("start",ParamBuffer) == 0){
+		sprintf(status,"%s",ParamBuffer);
+		}
+		chS++;
+		if(strcmp("pause",ParamBuffer) == 0){
+		sprintf(statusTwo,"%s",ParamBuffer);
+		olDaStop((HDASS)hAD);
+		CHECKERROR (olDaGetDASS(hDev,OLSS_DOUT,0,&hdass)); 
+		CHECKERROR (olDaSetDataFlow(hdass,OL_DF_SINGLEVALUE)); 
+		CHECKERROR (olDaConfig(hdass));
+		CHECKERROR (olDaPutSingleValue(hdass,fS,channel,gain));
+		CHECKERROR (olDaReleaseDASS(hdass));
+		cP = 1;
+		}
+		if(strcmp("resume",ParamBuffer) == 0){
+		sprintf(statusTwo,"%s",ParamBuffer);
+		olDaStart((HDASS)hAD);
+		CHECKERROR (olDaGetDASS(hDev,OLSS_DOUT,0,&hdass)); 
+		CHECKERROR (olDaSetDataFlow(hdass,OL_DF_SINGLEVALUE)); 
+		CHECKERROR (olDaConfig(hdass));
+		CHECKERROR (olDaPutSingleValue(hdass,fR,channel,gain));
+		CHECKERROR (olDaReleaseDASS(hdass));
+		cR = 1;
+		}
+	}
+	x = 0;
+ }
+
