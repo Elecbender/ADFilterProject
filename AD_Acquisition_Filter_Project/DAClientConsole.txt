@@ -1,6 +1,6 @@
 /*---------------------------------------------------------------------------------------------------------------------------------------
 
-PROGRAM: TxApp.cpp
+PROGRAM: TxApp.cpp (Transmission App)
 
 PURPOSE:
     Prompts the user for input, which is sent to the server.  Once the server is finished processing the filtered sine wave, values are
