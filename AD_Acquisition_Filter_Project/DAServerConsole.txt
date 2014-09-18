@@ -6,7 +6,7 @@ PURPOSE:
     To continuously sample a sine wave generator (a DT9816 was used),  apply a pre-generated filter(values are stored in a separate file)
     to the sine wave, then send the values back to the client.  For this project, the sampling rate is fixed at 2000 samples/sec
     for 3 seconds.
-    This file also has enchanced feedback (LEDs and text) allowing the user to know which phase the project is currently in.
+    This file also has enhanced feedback (LEDs and text) allowing the user to know which phase the project is currently in.
     
 *****************************************************************************************************************************************/
 
